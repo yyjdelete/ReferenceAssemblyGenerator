@@ -205,6 +205,20 @@ namespace ReferenceAssemblyGenerator.CLI
 
                     PurgeMethodBody(method);
                 }
+                if (!type.IsValueType && !(type.IsSealed && type.IsAbstract) && !type.FindInstanceConstructors().Any())
+                {
+                    //If it's an non-static class, inject an private default `.ctor` after all `.ctor` is removed.
+                    var implFlags = MethodImplAttributes.IL | MethodImplAttributes.Managed;
+                    var flags = MethodAttributes.Private |
+                                MethodAttributes.HideBySig |
+                                MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
+                    var ctor = new MethodDefUser(".ctor",
+                        MethodSig.CreateInstance(type.Module.CorLibTypes.Void), implFlags, flags);
+                    type.Methods.Insert(0, ctor);
+
+                    ctor.Body = new CilBody();
+                    PurgeMethodBody(ctor);
+                }
             }
 
             if (type.Fields.Count > 0)
@@ -445,9 +459,7 @@ namespace ReferenceAssemblyGenerator.CLI
                 return true;
             if (m.IsStaticConstructor)
                 return false;
-            //Keep `.ctor` it's the default one or the only one left.
-            if (m.IsInstanceConstructor && (m == m.DeclaringType.FindDefaultConstructor() || m.DeclaringType.FindInstanceConstructors().Count() == 1))
-                return true;
+            bool isReachable;
             //IsReachable for DeclaringType was checked in outter loop.
             switch (m.Access)
             {
@@ -458,18 +470,32 @@ namespace ReferenceAssemblyGenerator.CLI
                     return true;
                 case MethodAttributes.FamANDAssem://private protected
                 case MethodAttributes.Assembly://internal
-                    return s_ProgamOptions.KeepInternal != 0;
+                    isReachable = s_ProgamOptions.KeepInternal != 0;
+                    break;
                 case MethodAttributes.PrivateScope://??
-                    return false;
+                    isReachable = false;
+                    break;
                 case MethodAttributes.Private://private
                     {
                         //IsReachable for DeclaringType of overrides was checked and removed in outter loop.
                         //keeps `explicit interface member implementations`
-                        return m.HasOverrides;
+                        isReachable = m.HasOverrides;
                     }
+                    break;
                 default:
                     throw new InvalidOperationException($"Unreachable code. <-IsReachable(MethodDef.Access: {m.Access})");
             }
+            //Keep `.ctor` it's the default one or the only one left and doesn't have an unreachable param.
+            if (!isReachable && m.IsInstanceConstructor && !m.DeclaringType.IsValueType)
+            {
+                var ctor0 = m.DeclaringType.FindDefaultConstructor();
+                if (m == ctor0)
+                    return true;
+                if (ctor0 == null && m.MethodSig.Params.All(pd => IsReachable(pd)) &&
+                    !m.DeclaringType.FindInstanceConstructors().Any(c => c.Access >= ((s_ProgamOptions.KeepInternal != 0) ? MethodAttributes.FamANDAssem : MethodAttributes.Family)))
+                    return true;
+            }
+            return isReachable;
         }
 
         private static void CheckCustomAttributes(CustomAttributeCollection collection)
