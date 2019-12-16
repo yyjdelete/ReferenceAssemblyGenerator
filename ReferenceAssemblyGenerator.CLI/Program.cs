@@ -199,13 +199,15 @@ namespace ReferenceAssemblyGenerator.CLI
                     }
                     if (method.Parameters.ReturnParameter.ParamDef != null)
                         CheckCustomAttributes(method.Parameters.ReturnParameter.ParamDef.CustomAttributes);
+                    //It's strange but `UnityScript.Lang` reference an internal type as ReturnParameter in an public method of public class.
                     Debug.Assert(IsReachable(method.Parameters.ReturnParameter.Type));
 
                     CheckGenericParams(method.GenericParameters);
 
                     PurgeMethodBody(method);
                 }
-                if (!type.IsValueType && !(type.IsSealed && type.IsAbstract) && !type.FindInstanceConstructors().Any())
+
+                if (!type.IsValueType && !(type.IsSealed && type.IsAbstract) && !type.IsInterface && !type.FindInstanceConstructors().Any())
                 {
                     //If it's an non-static class, inject an private default `.ctor` after all `.ctor` is removed.
                     var implFlags = MethodImplAttributes.IL | MethodImplAttributes.Managed;
@@ -504,7 +506,7 @@ namespace ReferenceAssemblyGenerator.CLI
                 return;
             foreach (var attr in collection.ToArray())
             {
-                if (IsReachable(attr.AttributeType))
+                if (IsReachable(attr.AttributeType) && (!attr.Constructor.IsMethodDef || IsReachable((MethodDef)attr.Constructor)))
                     continue;
                 collection.Remove(attr);
             }
@@ -515,6 +517,12 @@ namespace ReferenceAssemblyGenerator.CLI
         }
 
         private static void PurgeMethodBody(MethodDef method)
+        {
+            IMethod baseTypeCtorRef = null;
+            PurgeMethodBody(method, ref baseTypeCtorRef);
+        }
+
+        private static void PurgeMethodBody(MethodDef method, ref IMethod baseTypeCtorRef)
         {
             if (method.IsAbstract)
             {
@@ -560,13 +568,25 @@ namespace ReferenceAssemblyGenerator.CLI
                     else
                     {
                         //Don't want to look into references, since reference assemblies not always available and match
-                        IMethod baseTypeCtorRef = null;
-                        if (oldBody != null && oldBody.Instructions.Count >= 3 && oldBody.Instructions[1].OpCode == OpCodes.Call && oldBody.Instructions[1].Operand is IMethod)
+                        if (baseTypeCtorRef == null && method.DeclaringType.BaseType.ToTypeSig() == method.Module.CorLibTypes.Object)
                         {
-                            var callMethod = (IMethod)oldBody.Instructions[1].Operand;
-                            if (callMethod.DeclaringType == method.DeclaringType.BaseType && callMethod.Name == ".ctor" && callMethod.MethodSig.Params.Count == 0)
+                            baseTypeCtorRef = new MemberRefUser(method.Module, ".ctor", MethodSig.CreateInstance(method.Module.CorLibTypes.Void), method.DeclaringType.BaseType);
+                        }
+                        if (baseTypeCtorRef == null && oldBody != null && oldBody.Instructions.Count >= 3)
+                        {
+                            // <field init>, ldarg_0, call, <ctor>, retn
+                            for (int i = 0; i < oldBody.Instructions.Count - 2; ++i)
                             {
-                                baseTypeCtorRef = callMethod;
+                                var inst0 = oldBody.Instructions[i];
+                                var inst1 = oldBody.Instructions[i + 1];
+                                if (inst0.IsLdarg() && inst0.GetParameterIndex() == 0 &&
+                                    inst1.OpCode == OpCodes.Call && inst1.Operand is IMethod ctorMethod &&
+                                    ctorMethod.DeclaringType == method.DeclaringType.BaseType && ctorMethod.Name == ".ctor" &&
+                                    ctorMethod.MethodSig.Params.Count == 0 && ctorMethod.MethodSig.GenParamCount == 0)
+                                {
+                                    baseTypeCtorRef = ctorMethod;
+                                    break;
+                                }
                             }
                         }
                         if (baseTypeCtorRef == null)
