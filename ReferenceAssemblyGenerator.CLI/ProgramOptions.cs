@@ -16,7 +16,7 @@ namespace ReferenceAssemblyGenerator.CLI
         [Option("keep-internal", Required = false, Default = (byte)2, HelpText = "Sets if internal metadata should be kept. (0: disable, 1: enable, 2: auto(default))")]
         public byte KeepInternal { get; set; }
 
-        [Option("inject-reference-assembly-attribute", Required = false, HelpText = "Inject ReferenceAssemblyAttribute")]
+        [Option("inject-reference-assembly-attribute", Required = false, HelpText = "Inject an ReferenceAssemblyAttribute to mark the Assembly as ReferenceAssembly, and you can only load it to reflection-only context.")]
         public bool InjectReferenceAssemblyAttribute { get; set; }
 
         [Option("use-runtime-mode", Required = false, HelpText = "Only use throw when needed, and change extern methods to normal")]
@@ -27,5 +27,8 @@ namespace ReferenceAssemblyGenerator.CLI
 
         [Value(0, MetaName = "assemblyPath", Required = true, HelpText = "Path to assembly to generate reference assembly for.")]
         public string AssemblyPath { get; set; }
+
+        [Option("delay-sign", Required = false, HelpText = "Use delay sign instead of remove pubkey")]
+        public bool DelaySign { get; set; }
     }
 }

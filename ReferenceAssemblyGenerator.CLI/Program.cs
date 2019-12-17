@@ -54,9 +54,12 @@ namespace ReferenceAssemblyGenerator.CLI
                 }
                 module.IsILOnly = true;
                 module.VTableFixups = null;
-                module.IsStrongNameSigned = false;
-                module.Assembly.PublicKey = null;
-                module.Assembly.HasPublicKey = false;
+                if (module.IsStrongNameSigned && !s_ProgamOptions.DelaySign)
+                {
+                    module.IsStrongNameSigned = false;
+                    module.Assembly.PublicKey = null;
+                    module.Assembly.HasPublicKey = false;
+                }
 
                 CheckTypes(module.Types);
 
@@ -75,7 +78,8 @@ namespace ReferenceAssemblyGenerator.CLI
                     module.Write(outputStream, new dnlib.DotNet.Writer.ModuleWriterOptions(module)
                     {
                         ShareMethodBodies = true,
-                        AddMvidSection = true
+                        AddMvidSection = true,
+                        DelaySign = s_ProgamOptions.DelaySign
                     });
                     outputStream.Position = 0;
                     using (var fileStream = File.Create(opts.OutputFile))
