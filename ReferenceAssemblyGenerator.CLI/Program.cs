@@ -75,12 +75,15 @@ namespace ReferenceAssemblyGenerator.CLI
 
                 using (MemoryStream outputStream = new MemoryStream())
                 {
-                    module.Write(outputStream, new dnlib.DotNet.Writer.ModuleWriterOptions(module)
+                    var moduleOpts = new dnlib.DotNet.Writer.ModuleWriterOptions(module)
                     {
                         ShareMethodBodies = true,
                         AddMvidSection = true,
-                        DelaySign = s_ProgamOptions.DelaySign
-                    });
+                        DelaySign = s_ProgamOptions.DelaySign,
+                        Logger = ErrorLogger.Instance,//sender is dnlib.DotNet.Writer.ModuleWriter
+                        //MetadataLogger = ErrorLogger.Instance,//dnlib.DotNet.Writer.Metadata
+                    };
+                    module.Write(outputStream, moduleOpts);
                     outputStream.Position = 0;
                     using (var fileStream = File.Create(opts.OutputFile))
                     {
@@ -671,5 +674,21 @@ namespace ReferenceAssemblyGenerator.CLI
 
             method.Body.UpdateInstructionOffsets();
         }
+        private class ErrorLogger : ILogger
+        {
+            public static ErrorLogger Instance { get; } = new ErrorLogger();
+            private ErrorLogger() { }
+
+            public bool IgnoresEvent(LoggerEvent loggerEvent)
+            {
+                return loggerEvent >= LoggerEvent.Info;
+            }
+
+            public void Log(object sender, LoggerEvent loggerEvent, string format, params object[] args)
+            {
+                string msg = $"{loggerEvent}: {string.Format(format, args)}";
+
+                Console.Error.WriteLine(msg);
+            }
     }
 }
