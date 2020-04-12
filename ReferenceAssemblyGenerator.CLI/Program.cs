@@ -688,7 +688,50 @@ namespace ReferenceAssemblyGenerator.CLI
             {
                 string msg = $"{loggerEvent}: {string.Format(format, args)}";
 
+                var type = TryReportLastTypeDef(sender, out var module);
+                if (module != null)
+                    msg += $" <- for module '{module.Name}'";
+                if (!string.IsNullOrEmpty(type))
+                    msg += $" <- Maybe happen near type '{type}'";
+
                 Console.Error.WriteLine(msg);
             }
+
+            private static System.Reflection.MethodInfo mMetadata_GetAllTypeDefs;
+            private static string TryReportLastTypeDef(object sender, out ModuleDef module)
+            {
+                module = null;
+                if (sender is dnlib.DotNet.Writer.ModuleWriter mw)
+                    sender = mw.Metadata;
+                if (sender is dnlib.DotNet.Writer.Metadata writer)
+                {
+                    module = writer.Module;
+                    dnlib.DotNet.MD.RawTypeDefRow cur = default;
+                    int row;
+                    for (row = writer.TablesHeap.TypeDefTable.Rows; row > 0; --row)
+                    {
+                        cur = writer.TablesHeap.TypeDefTable[(uint)row];
+                        if (cur.Name != 0)
+                            break;
+                    }
+                    try
+                    {
+                        mMetadata_GetAllTypeDefs = mMetadata_GetAllTypeDefs ?? typeof(dnlib.DotNet.Writer.Metadata).GetMethod("GetAllTypeDefs", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+                        TypeDef[] typeDefs = (TypeDef[])mMetadata_GetAllTypeDefs.Invoke(writer, Array.Empty<object>());
+                        var type = typeDefs.Where(def => writer.GetRid(def) == row).FirstOrDefault();
+                        if (type != null)
+                        {
+                            return type.FullName;
+                        }
+                    }
+                    catch
+                    {
+                        //ignore all Exceptions
+                    }
+                }
+                return null;
+            }
+        }
     }
 }
