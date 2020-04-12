@@ -11,6 +11,8 @@ namespace ReferenceAssemblyGenerator.CLI
 {
     public class Program
     {
+        private const string CompilerGeneratedAttribute = "System.Runtime.CompilerServices.CompilerGeneratedAttribute";
+
         public static int Main(string[] args)
         {
             var result = Parser.Default.ParseArguments<ProgramOptions>(args)
@@ -25,11 +27,6 @@ namespace ReferenceAssemblyGenerator.CLI
         {
             s_ProgamOptions = opts;
 
-            if (!File.Exists(opts.AssemblyPath))
-            {
-                throw new FileNotFoundException("Assembly file was not found", opts.AssemblyPath);
-            }
-
             if (string.IsNullOrEmpty(opts.OutputFile))
             {
                 string fileName = Path.GetFileNameWithoutExtension(opts.AssemblyPath);
@@ -38,59 +35,126 @@ namespace ReferenceAssemblyGenerator.CLI
                 opts.OutputFile = opts.AssemblyPath.Replace(fileName + extension, fileName + "-reference" + extension);
             }
 
-            if (File.Exists(opts.OutputFile) && !opts.Force)
+
+            if (Directory.Exists(opts.AssemblyPath))
             {
-                throw new Exception("Output file exists already. Use --force to override it.");
+                var baseLen = Path.GetFullPath(opts.AssemblyPath).Length + 1;
+                foreach (var path in Directory.EnumerateFiles(opts.AssemblyPath, "*.dll", SearchOption.AllDirectories)
+                    .Concat(Directory.EnumerateFiles(opts.AssemblyPath, "*.exe", SearchOption.AllDirectories))
+                    .Concat(Directory.EnumerateFiles(opts.AssemblyPath, "*.winmd", SearchOption.AllDirectories)))
+                {
+                    ProcessSingleFileSafe(path, Path.Combine(opts.OutputFile, path.Substring(baseLen)));
+                }
+            }
+            else
+            {
+                if (!File.Exists(opts.AssemblyPath))
+                {
+                    throw new FileNotFoundException("Assembly file was not found", opts.AssemblyPath);
+                }
+                var outputDir = Path.GetDirectoryName(opts.OutputFile);
+                if (!Directory.Exists(outputDir))
+                    Directory.CreateDirectory(outputDir);
+                ProcessSingleFileSafe(opts.AssemblyPath, opts.OutputFile);
+            }
+        }
+        private static void ProcessSingleFileSafe(string input, string output)
+        {
+            byte keepInternal = s_ProgamOptions.KeepInternal;
+            try
+            {
+                ProcessSingleFile(input, output);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: Process file '{input}' failed. <- {ex}");
+            }
+            finally
+            {
+                //Reset KeepInternal options for auto mode
+                s_ProgamOptions.KeepInternal = keepInternal;
+            }
+        }
+
+        private static void ProcessSingleFile(string input, string output)
+        {
+            if (File.Exists(output) && !s_ProgamOptions.Force)
+            {
+                throw new Exception($"Output file '{input}' exists already. Use --force to override it.");
             }
 
-            byte[] assemblyData = File.ReadAllBytes(opts.AssemblyPath);
+            byte[] assemblyData = File.ReadAllBytes(input);
 
             using (MemoryStream inputStream = new MemoryStream(assemblyData))
             {
-                ModuleDefMD module = ModuleDefMD.Load(inputStream);
-                if (s_ProgamOptions.KeepInternal > 1)
+                do
                 {
-                    s_ProgamOptions.KeepInternal = (byte)(module.Assembly.CustomAttributes.IsDefined("System.Runtime.CompilerServices.InternalsVisibleToAttribute") ? 1 : 0);
-                }
-                module.IsILOnly = true;
-                module.VTableFixups = null;
-                if (module.IsStrongNameSigned && !s_ProgamOptions.DelaySign)
-                {
-                    module.IsStrongNameSigned = false;
-                    module.Assembly.PublicKey = null;
-                    module.Assembly.HasPublicKey = false;
-                }
-
-                CheckTypes(module.Types);
-
-                CheckCustomAttributes(module.Assembly.CustomAttributes);
-                CheckCustomAttributes(module.CustomAttributes);
-                if (s_ProgamOptions.InjectReferenceAssemblyAttribute)
-                    InjectReferenceAssemblyAttribute(module);
-
-                if (File.Exists(opts.OutputFile))
-                {
-                    File.Delete(opts.OutputFile);
-                }
-
-                using (MemoryStream outputStream = new MemoryStream())
-                {
-                    var moduleOpts = new dnlib.DotNet.Writer.ModuleWriterOptions(module)
+                    inputStream.Position = 0;
+                    ModuleDefMD module;
+                    try
                     {
-                        ShareMethodBodies = true,
-                        AddMvidSection = true,
-                        DelaySign = s_ProgamOptions.DelaySign,
-                        Logger = ErrorLogger.Instance,//sender is dnlib.DotNet.Writer.ModuleWriter
-                        //MetadataLogger = ErrorLogger.Instance,//dnlib.DotNet.Writer.Metadata
-                    };
-                    moduleOpts.MetadataOptions.Flags |= dnlib.DotNet.Writer.MetadataFlags.RoslynSortInterfaceImpl;
-                    module.Write(outputStream, moduleOpts);
-                    outputStream.Position = 0;
-                    using (var fileStream = File.Create(opts.OutputFile))
-                    {
-                        outputStream.CopyTo(fileStream);
+                        module = ModuleDefMD.Load(inputStream);
                     }
-                }
+                    catch (BadImageFormatException ex)
+                    {
+                        Console.WriteLine($"Info: Skip non-module file '{input}' <- {ex.Message}");
+                        return;
+                    }
+                    if (s_ProgamOptions.KeepInternal == 2 && !module.Assembly.CustomAttributes.IsDefined("System.Runtime.CompilerServices.InternalsVisibleToAttribute"))
+                        s_ProgamOptions.KeepInternal = 0;
+
+                    module.IsILOnly = true;
+                    module.VTableFixups = null;
+                    if (module.IsStrongNameSigned && !s_ProgamOptions.DelaySign)
+                    {
+                        module.IsStrongNameSigned = false;
+                        module.Assembly.PublicKey = null;
+                        module.Assembly.HasPublicKey = false;
+                    }
+                    if (!s_ProgamOptions.KeepResource)
+                        module.Resources.Clear();
+
+                    try
+                    {
+                        CheckTypes(module.Types);
+
+                        CheckCustomAttributes(module.Assembly.CustomAttributes);
+                        CheckCustomAttributes(module.CustomAttributes);
+                        if (s_ProgamOptions.InjectReferenceAssemblyAttribute)
+                            InjectReferenceAssemblyAttribute(module);
+                    }
+                    catch (TryAgainException)
+                    {
+                        continue;
+                    }
+
+                    if (File.Exists(output))
+                    {
+                        File.Delete(output);
+                    }
+
+                    using (MemoryStream outputStream = new MemoryStream())
+                    {
+                        var moduleOpts = new dnlib.DotNet.Writer.ModuleWriterOptions(module)
+                        {
+                            ShareMethodBodies = true,
+                            AddMvidSection = true,
+                            DelaySign = s_ProgamOptions.DelaySign,
+                            Logger = ErrorLogger.Instance,//sender is dnlib.DotNet.Writer.ModuleWriter
+                                                          //MetadataLogger = ErrorLogger.Instance,//dnlib.DotNet.Writer.Metadata
+                        };
+                        moduleOpts.MetadataOptions.Flags |= dnlib.DotNet.Writer.MetadataFlags.RoslynSortInterfaceImpl;
+                        module.Write(outputStream, moduleOpts);
+                        outputStream.Position = 0;
+                        if (!Directory.Exists(Path.GetDirectoryName(output)))
+                            Directory.CreateDirectory(Path.GetDirectoryName(output));
+                        using (var fileStream = File.Create(output))
+                        {
+                            outputStream.CopyTo(fileStream);
+                        }
+                    }
+                    break;
+                } while (false);
             }
         }
 
@@ -158,7 +222,7 @@ namespace ReferenceAssemblyGenerator.CLI
                 parent.Remove(type);
                 return;
             }
-
+            Assert(type.BaseType == null || IsReachable(type.BaseType), type);
             CheckCustomAttributes(type.CustomAttributes);
             CheckGenericParams(type.GenericParameters);
 
@@ -176,7 +240,7 @@ namespace ReferenceAssemblyGenerator.CLI
                                 continue;
                             foreach (var mo in method.Overrides.ToArray())
                             {
-                                if (mo.MethodDeclaration.DeclaringType == @interface.Interface)
+                                if (new SigComparer().Equals(mo.MethodDeclaration.DeclaringType, @interface.Interface))
                                 {
                                     method.Overrides.Remove(mo);
                                 }
@@ -203,11 +267,11 @@ namespace ReferenceAssemblyGenerator.CLI
                     {
                         if (mp.ParamDef != null)
                             CheckCustomAttributes(mp.ParamDef.CustomAttributes);
-                        Debug.Assert(IsReachable(mp.Type));
+                        Assert(IsReachable(mp.Type), method);
                     }
                     if (method.Parameters.ReturnParameter.ParamDef != null)
                         CheckCustomAttributes(method.Parameters.ReturnParameter.ParamDef.CustomAttributes);
-                    Debug.Assert(IsReachable(method.Parameters.ReturnParameter.Type));
+                    Assert(IsReachable(method.Parameters.ReturnParameter.Type), method);
 
                     CheckGenericParams(method.GenericParameters);
 
@@ -263,7 +327,7 @@ namespace ReferenceAssemblyGenerator.CLI
                         continue;
                     }
                     CheckCustomAttributes(field.CustomAttributes);
-                    Debug.Assert(IsReachable(field.FieldType));
+                    Assert(IsReachable(field.FieldType), field);
                 }
                 if (mode != 0)
                 {
@@ -314,7 +378,7 @@ namespace ReferenceAssemblyGenerator.CLI
                         continue;
                     }
                     CheckCustomAttributes(@event.CustomAttributes);
-                    Debug.Assert(IsReachable(@event.EventType));
+                    Assert(IsReachable(@event.EventType), @event);
                 }
             }
 
@@ -350,10 +414,17 @@ namespace ReferenceAssemblyGenerator.CLI
 
         private static bool IsWellKnownCompilerInjectedType(TypeDef t)
         {
-            return (t.Visibility == TypeAttributes.NotPublic &&
-                (t.FullName.StartsWith("System.Runtime.CompilerServices.", StringComparison.Ordinal) ||
-                t.FullName.StartsWith("Microsoft.CodeAnalysis.", StringComparison.Ordinal) ||
-                t.FullName.StartsWith("System.Diagnostics.CodeAnalysis", StringComparison.Ordinal)));
+            if (t.Visibility != TypeAttributes.NotPublic)
+                return false;
+            if (!t.FullName.EndsWith("Attribute", StringComparison.Ordinal))
+                return false;
+            if (t.FullName.StartsWith("System.Runtime.CompilerServices.", StringComparison.Ordinal))
+                return !t.Module.Name.StartsWith("System.Runtime.CompilerServices.", StringComparison.Ordinal);
+            if (t.FullName.StartsWith("Microsoft.CodeAnalysis.", StringComparison.Ordinal))
+                return !t.Module.Name.StartsWith("Microsoft.CodeAnalysis.", StringComparison.Ordinal);
+            if (t.FullName.StartsWith("System.Diagnostics.CodeAnalysis.", StringComparison.Ordinal))
+                return !t.Module.Name.StartsWith("System.Diagnostics.CodeAnalysis.", StringComparison.Ordinal);
+            return false;
         }
 
         private static bool IsReachable(TypeDef t, bool doNestedCheck)
@@ -367,34 +438,51 @@ namespace ReferenceAssemblyGenerator.CLI
             //Skip compile inject internal attributes
             if (IsWellKnownCompilerInjectedType(t))
                 return true;
+            if (s_ProgamOptions.KeepInternal == 2 &&
+                (t.Visibility == TypeAttributes.NestedAssembly || t.Visibility == TypeAttributes.NotPublic) &&
+                t.CustomAttributes.IsDefined(CompilerGeneratedAttribute))
+                return false;
+            bool isReachable;
             //IsReachable for DeclaringType was checked in outter loop.
             switch (t.Visibility)
             {
                 case TypeAttributes.Public://public
                     return true;
                 case TypeAttributes.NestedPublic://public
-                    return true && (!doNestedCheck | IsReachable(t.DeclaringType, true));
+                    isReachable = true && (!doNestedCheck | IsReachable(t.DeclaringType, true));
+                    break;
                 case TypeAttributes.NestedFamily://protected
                 case TypeAttributes.NestedFamORAssem://protected internal
-                    return true && (!doNestedCheck || IsReachable(t.DeclaringType, true));
+                    isReachable = true && (!doNestedCheck || IsReachable(t.DeclaringType, true));
+                    break;
                 case TypeAttributes.NotPublic://internal
                     {
-                        //HACK: It's strange but `UnityScript.Lang` reference an internal type as ReturnParameter in an public method of public class.
-                        if (t.FullName == "UnityScript.Lang.Expando")
-                        {
-                            t.Visibility = TypeAttributes.Public;
-                            return true;
-                        }
-                        return s_ProgamOptions.KeepInternal != 0;
+                        isReachable = s_ProgamOptions.KeepInternal != 0;
                     }
+                    break;
                 case TypeAttributes.NestedAssembly://internal
                 case TypeAttributes.NestedFamANDAssem://private protected
-                    return s_ProgamOptions.KeepInternal != 0 && (!doNestedCheck || IsReachable(t.DeclaringType, true));
+                    isReachable = s_ProgamOptions.KeepInternal != 0 && (!doNestedCheck || IsReachable(t.DeclaringType, true));
+                    break;
                 case TypeAttributes.NestedPrivate://private
-                    return false;
+                    isReachable = false;
+                    break;
                 default:
                     throw new InvalidOperationException($"Unreachable code. <-IsReachable(TypeDef.Visibility: {t.Visibility})");
             }
+            if (!isReachable && t.Module.EntryPoint != null)
+            {
+                //TODO: Can only keep the method and remove all other members in the type.
+                var type = t.Module.EntryPoint.DeclaringType;
+
+                while (type != null)
+                {
+                    if (new SigComparer().Equals(type, t))
+                        return true;
+                    type = type.DeclaringType;
+                }
+            }
+            return isReachable;
         }
 
         private static bool IsReachable(TypeSpec t)
@@ -453,6 +541,10 @@ namespace ReferenceAssemblyGenerator.CLI
                 return true;
             if (f?.Module == null)
                 return false;
+            if (s_ProgamOptions.KeepInternal == 2 &&
+                f.Access == FieldAttributes.Assembly &&
+                f.CustomAttributes.IsDefined(CompilerGeneratedAttribute))
+                return false;
             //IsReachable for DeclaringType was checked in outter loop.
             switch (f.Access)
             {
@@ -480,6 +572,11 @@ namespace ReferenceAssemblyGenerator.CLI
                 return false;
             if (m.IsStaticConstructor)
                 return false;
+            if (s_ProgamOptions.KeepInternal == 2 &&
+                m.Access == MethodAttributes.Assembly &&
+                m.CustomAttributes.IsDefined(CompilerGeneratedAttribute) &&
+                !m.HasOverrides)
+                return false;
             bool isReachable;
             //IsReachable for DeclaringType was checked in outter loop.
             switch (m.Access)
@@ -494,8 +591,6 @@ namespace ReferenceAssemblyGenerator.CLI
                     isReachable = s_ProgamOptions.KeepInternal != 0;
                     break;
                 case MethodAttributes.PrivateScope://??
-                    isReachable = false;
-                    break;
                 case MethodAttributes.Private://private
                     {
                         //IsReachable for DeclaringType of overrides was checked and removed in outter loop.
@@ -516,6 +611,9 @@ namespace ReferenceAssemblyGenerator.CLI
                     !m.DeclaringType.FindInstanceConstructors().Any(c => c.Access >= ((s_ProgamOptions.KeepInternal != 0) ? MethodAttributes.FamANDAssem : MethodAttributes.Family)))
                     return true;
             }
+            //Keep `Main()` as EntryPoint
+            if (!isReachable && m == m.Module.EntryPoint)
+                return true;
             return isReachable;
         }
 
@@ -546,9 +644,10 @@ namespace ReferenceAssemblyGenerator.CLI
                 return false;
             if (!attr.NamedArguments.All(na => IsReachable(na.Type) && IsReachable(na.Argument)))
                 return false;
+            //TODO: It can be field/prop in base types, so maybe can't do verify on it, since the field/prop maybe already removed here, and can not be diff from exists in baseType?
             //Verify there is no unreachable fields or properties
-            if (attr.AttributeType.IsTypeDef && !attr.NamedArguments.All(na => na.IsField ? IsReachable(((TypeDef)attr.AttributeType).GetField(na.Name)) : IsReachable(((TypeDef)attr.AttributeType).FindProperty(na.Name)?.SetMethod)))
-                return false;
+            //if (attr.AttributeType.IsTypeDef && !attr.NamedArguments.All(na => na.IsField ? IsReachable(((TypeDef)attr.AttributeType).GetField(na.Name)) : IsReachable(((TypeDef)attr.AttributeType).FindProperty(na.Name)?.SetMethod)))
+            //    return false;
 
             return true;
         }
@@ -621,11 +720,6 @@ namespace ReferenceAssemblyGenerator.CLI
                     }
                     else
                     {
-                        //Don't want to look into references, since reference assemblies not always available and match
-                        if (baseTypeCtorRef == null && method.DeclaringType.BaseType.ToTypeSig() == method.Module.CorLibTypes.Object)
-                        {
-                            baseTypeCtorRef = new MemberRefUser(method.Module, ".ctor", MethodSig.CreateInstance(method.Module.CorLibTypes.Void), method.DeclaringType.BaseType);
-                        }
                         if (baseTypeCtorRef == null && oldBody != null && oldBody.Instructions.Count >= 3)
                         {
                             // <field init>, ldarg_0, call, <ctor>, retn
@@ -635,7 +729,7 @@ namespace ReferenceAssemblyGenerator.CLI
                                 var inst1 = oldBody.Instructions[i + 1];
                                 if (inst0.IsLdarg() && inst0.GetParameterIndex() == 0 &&
                                     inst1.OpCode == OpCodes.Call && inst1.Operand is IMethod ctorMethod &&
-                                    ctorMethod.DeclaringType == method.DeclaringType.BaseType && ctorMethod.Name == ".ctor" &&
+                                    new SigComparer().Equals(ctorMethod.DeclaringType, method.DeclaringType.BaseType) && ctorMethod.Name == ".ctor" &&
                                     ctorMethod.MethodSig.Params.Count == 0 && ctorMethod.MethodSig.GenParamCount == 0)
                                 {
                                     baseTypeCtorRef = ctorMethod;
@@ -643,8 +737,13 @@ namespace ReferenceAssemblyGenerator.CLI
                                 }
                             }
                         }
+                        if (baseTypeCtorRef == null && new SigComparer().Equals(method.DeclaringType.BaseType.ToTypeSig(), method.Module.CorLibTypes.Object))
+                        {
+                            baseTypeCtorRef = new MemberRefUser(method.Module, ".ctor", MethodSig.CreateInstance(method.Module.CorLibTypes.Void), method.DeclaringType.BaseType);
+                        }
                         if (baseTypeCtorRef == null)
                         {
+                            //Don't want to look into references, since reference assemblies not always available and match
                             //TODO:TypeSpec for generic types
                             var baseTypeCtor = (method.DeclaringType.BaseType as TypeDef)?.FindDefaultConstructor();
                             if (baseTypeCtor != null && (baseTypeCtor.Access >= MethodAttributes.Family || (baseTypeCtor.Access >= MethodAttributes.Family && baseTypeCtor.DeclaringType.Module == method.DeclaringType.Module)))
@@ -687,7 +786,7 @@ namespace ReferenceAssemblyGenerator.CLI
                     method.Body.Instructions.Add(Instruction.Create(OpCodes.Leave_S, retn));
                     method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
                     IMethod baseMethod = method.Overrides[0].MethodDeclaration;
-                    bool doAnotherCheck = method.DeclaringType.BaseType != baseMethod.DeclaringType;
+                    bool doAnotherCheck = !new SigComparer().Equals(method.DeclaringType.BaseType, baseMethod.DeclaringType);
                     if (doAnotherCheck && oldBody != null && oldBody.Instructions.Count >= 5 && oldBody.Instructions[oldBody.Instructions.Count - 3].OpCode == OpCodes.Call && oldBody.Instructions[oldBody.Instructions.Count - 3].Operand is IMethod)
                     {
                         var callMethod = (IMethod)oldBody.Instructions[oldBody.Instructions.Count - 3].Operand;
@@ -701,7 +800,7 @@ namespace ReferenceAssemblyGenerator.CLI
                     {
                         //TODO:TypeSpec for generic types
                         var baseMethod2 = ((TypeDef)method.DeclaringType.BaseType).FindMethod("Finalize", baseMethod.MethodSig);
-                        if (method.Access == MethodAttributes.Family && baseMethod2.IsVirtual)
+                        if (baseMethod2 != null && baseMethod2.Access == MethodAttributes.Family && baseMethod2.IsVirtual)
                         {
                             baseMethod = baseMethod2;
                         }
@@ -721,6 +820,38 @@ namespace ReferenceAssemblyGenerator.CLI
 
             method.Body.UpdateInstructionOffsets();
         }
+
+        [Conditional("DEBUG")]
+        private static void Assert(bool flag, IMemberRef refer)
+        {
+            //internal refs used by public ones maybe cause by ILMerge.
+            if (flag)
+                return;
+
+            Console.Error.WriteLine($"Warning: Assert failed when process with '[{refer.Module.Name}]{refer.FullName}'");
+            if (!s_ProgamOptions.KeepNonPublic && s_ProgamOptions.KeepInternal != 1)
+            {
+                bool tryAgain = false;
+                if (s_ProgamOptions.KeepInternal == 2 || s_ProgamOptions.KeepInternal == 3)
+                {
+                    s_ProgamOptions.KeepInternal = 1;
+                    tryAgain = true;
+                }
+                else if (s_ProgamOptions.KeepInternal == 0)
+                {
+                    s_ProgamOptions.KeepInternal = 3;
+                    tryAgain = true;
+                }
+                if (tryAgain)
+                {
+                    Console.Error.WriteLine($"Warning: Maybe caused by ILMerge, try again with KeepInternal={s_ProgamOptions.KeepInternal}");
+                    throw new TryAgainException();
+                }
+            }
+            if (Debugger.IsAttached)
+                Debugger.Break();
+        }
+
         private class ErrorLogger : ILogger
         {
             public static ErrorLogger Instance { get; } = new ErrorLogger();
@@ -778,6 +909,13 @@ namespace ReferenceAssemblyGenerator.CLI
                     }
                 }
                 return null;
+            }
+        }
+
+        public class TryAgainException : Exception
+        {
+            public TryAgainException()
+            {
             }
         }
     }

@@ -30,5 +30,8 @@ namespace ReferenceAssemblyGenerator.CLI
 
         [Option("delay-sign", Required = false, HelpText = "Use delay sign instead of remove pubkey")]
         public bool DelaySign { get; set; }
+
+        [Option("keep-resource", Required = false, HelpText = "Do not remove resources.")]
+        public bool KeepResource { get; set; }
     }
 }
