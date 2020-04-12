@@ -360,7 +360,7 @@ namespace ReferenceAssemblyGenerator.CLI
         {
             if (s_ProgamOptions.KeepNonPublic)
                 return true;
-            if (t == null)
+            if (t?.Module == null)
                 return false;
             //if (t.IsGlobalModuleType)
             //    return true;
@@ -373,15 +373,23 @@ namespace ReferenceAssemblyGenerator.CLI
                 case TypeAttributes.Public://public
                     return true;
                 case TypeAttributes.NestedPublic://public
-                    return true;// && IsReachable(t.DeclaringType);
+                    return true && (!doNestedCheck | IsReachable(t.DeclaringType, true));
                 case TypeAttributes.NestedFamily://protected
                 case TypeAttributes.NestedFamORAssem://protected internal
-                    return true && (!doNestedCheck || IsReachable(t.DeclaringType, doNestedCheck));
+                    return true && (!doNestedCheck || IsReachable(t.DeclaringType, true));
                 case TypeAttributes.NotPublic://internal
-                    return s_ProgamOptions.KeepInternal != 0;
+                    {
+                        //HACK: It's strange but `UnityScript.Lang` reference an internal type as ReturnParameter in an public method of public class.
+                        if (t.FullName == "UnityScript.Lang.Expando")
+                        {
+                            t.Visibility = TypeAttributes.Public;
+                            return true;
+                        }
+                        return s_ProgamOptions.KeepInternal != 0;
+                    }
                 case TypeAttributes.NestedAssembly://internal
                 case TypeAttributes.NestedFamANDAssem://private protected
-                    return s_ProgamOptions.KeepInternal != 0 && (!doNestedCheck || IsReachable(t.DeclaringType, doNestedCheck));
+                    return s_ProgamOptions.KeepInternal != 0 && (!doNestedCheck || IsReachable(t.DeclaringType, true));
                 case TypeAttributes.NestedPrivate://private
                     return false;
                 default:
@@ -423,7 +431,7 @@ namespace ReferenceAssemblyGenerator.CLI
         private static bool IsReachable(TypeRef t)
         {
             //Don't want to look into references, since reference assemblies not always available and match
-            return t != null;
+            return t != null && t.Module != null;
         }
 
         private static bool IsReachable(ITypeDefOrRef t)
@@ -443,6 +451,8 @@ namespace ReferenceAssemblyGenerator.CLI
         {
             if (s_ProgamOptions.KeepNonPublic)
                 return true;
+            if (f?.Module == null)
+                return false;
             //IsReachable for DeclaringType was checked in outter loop.
             switch (f.Access)
             {
@@ -466,6 +476,8 @@ namespace ReferenceAssemblyGenerator.CLI
         {
             if (s_ProgamOptions.KeepNonPublic)
                 return true;
+            if (m?.Module == null)
+                return false;
             if (m.IsStaticConstructor)
                 return false;
             bool isReachable;
