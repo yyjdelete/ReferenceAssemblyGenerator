@@ -83,6 +83,7 @@ namespace ReferenceAssemblyGenerator.CLI
                         Logger = ErrorLogger.Instance,//sender is dnlib.DotNet.Writer.ModuleWriter
                         //MetadataLogger = ErrorLogger.Instance,//dnlib.DotNet.Writer.Metadata
                     };
+                    moduleOpts.MetadataOptions.Flags |= dnlib.DotNet.Writer.MetadataFlags.RoslynSortInterfaceImpl;
                     module.Write(outputStream, moduleOpts);
                     outputStream.Position = 0;
                     using (var fileStream = File.Create(opts.OutputFile))
