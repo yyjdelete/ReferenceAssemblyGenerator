@@ -207,7 +207,6 @@ namespace ReferenceAssemblyGenerator.CLI
                     }
                     if (method.Parameters.ReturnParameter.ParamDef != null)
                         CheckCustomAttributes(method.Parameters.ReturnParameter.ParamDef.CustomAttributes);
-                    //It's strange but `UnityScript.Lang` reference an internal type as ReturnParameter in an public method of public class.
                     Debug.Assert(IsReachable(method.Parameters.ReturnParameter.Type));
 
                     CheckGenericParams(method.GenericParameters);
@@ -508,17 +507,52 @@ namespace ReferenceAssemblyGenerator.CLI
             return isReachable;
         }
 
+        private static bool IsReachable(CAArgument attrArg)
+        {
+            if (!IsReachable(attrArg.Type))
+                return false;
+
+            if (attrArg.Value is TypeSig)
+            {
+                return IsReachable((TypeSig)attrArg.Value);
+            }
+            if (attrArg.Value is List<CAArgument>)
+            {
+                return ((List<CAArgument>)attrArg.Value).All(ca => IsReachable(ca));
+            }
+            return true;
+        }
+
+        private static bool IsReachable(CustomAttribute attr)
+        {
+            if (!IsReachable(attr.AttributeType))
+                return false;
+            if (attr.Constructor.IsMethodDef && !IsReachable((MethodDef)attr.Constructor))
+                return false;
+            //Verify there is no unreachable type(typeof or Enum value) in all args(and array or nested array in args).
+            if (!attr.ConstructorArguments.All(ca => IsReachable(ca)))
+                return false;
+            if (!attr.NamedArguments.All(na => IsReachable(na.Type) && IsReachable(na.Argument)))
+                return false;
+            //Verify there is no unreachable fields or properties
+            if (attr.AttributeType.IsTypeDef && !attr.NamedArguments.All(na => na.IsField ? IsReachable(((TypeDef)attr.AttributeType).GetField(na.Name)) : IsReachable(((TypeDef)attr.AttributeType).FindProperty(na.Name)?.SetMethod)))
+                return false;
+
+            return true;
+        }
+
+
         private static void CheckCustomAttributes(CustomAttributeCollection collection)
         {
             if (collection.Count == 0)
                 return;
             foreach (var attr in collection.ToArray())
             {
-                if (IsReachable(attr.AttributeType) && (!attr.Constructor.IsMethodDef || IsReachable((MethodDef)attr.Constructor)))
-                    continue;
-                collection.Remove(attr);
+                if (!IsReachable(attr))
+                    collection.Remove(attr);
             }
         }
+
         public class A
         {
             public A(out int _) { new A(out _); }
